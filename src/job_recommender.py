@@ -1,120 +1,257 @@
+```python
 """
-JobSentinel - Adzuna Job Recommendation
+JobSentinel - Adzuna Job Recommendation Module
 
-Searches Adzuna for real job opportunities and returns
-normalized job dictionaries for the recommendation system.
+Supports:
+- Local development using .env
+- Streamlit Cloud using st.secrets
+- Adzuna India API
+- Job title + location search
+- Normalized job results
+- Similar-job recommendation support
 """
 
 import os
+from typing import Any, Dict, List, Optional
+
 import requests
 from dotenv import load_dotenv
 
+# ---------------------------------------------------------------------------
+# Optional Streamlit import
+# ---------------------------------------------------------------------------
 
-# ============================================================
-# ENVIRONMENT
-# ============================================================
-
-PROJECT_ROOT = os.path.dirname(
-    os.path.dirname(
-        os.path.abspath(__file__)
-    )
-)
-
-ENV_PATH = os.path.join(
-    PROJECT_ROOT,
-    ".env"
-)
-
-load_dotenv(ENV_PATH)
+try:
+    import streamlit as st
+except ImportError:
+    st = None
 
 
-ADZUNA_APP_ID = os.getenv("ADZUNA_APP_ID")
-ADZUNA_APP_KEY = os.getenv("ADZUNA_APP_KEY")
+# ---------------------------------------------------------------------------
+# Load local .env
+# ---------------------------------------------------------------------------
 
-ADZUNA_COUNTRY = "in"
-
-ADZUNA_SEARCH_URL = (
-    f"https://api.adzuna.com/v1/api/jobs/"
-    f"{ADZUNA_COUNTRY}/search/1"
-)
+load_dotenv()
 
 
-# ============================================================
-# HELPERS
-# ============================================================
+# ---------------------------------------------------------------------------
+# Configuration
+# ---------------------------------------------------------------------------
 
-def clean_text(value):
-    if value is None:
-        return ""
-
-    return str(value).strip()
+ADZUNA_BASE_URL = "https://api.adzuna.com/v1/api/jobs/in/search"
+ADZUNA_TIMEOUT = 20
 
 
-def build_keywords(job_data):
+# ---------------------------------------------------------------------------
+# Secrets / Environment Variables
+# ---------------------------------------------------------------------------
+
+def get_config_value(name: str) -> Optional[str]:
     """
-    Build Adzuna search keyword.
+    Get configuration value.
 
     Priority:
-        title
-        function
-        department
-        industry
+    1. Streamlit Secrets
+    2. Environment variables / .env
     """
 
-    if not isinstance(job_data, dict):
-        return ""
+    # Streamlit Cloud
+    if st is not None:
+        try:
+            value = st.secrets.get(name)
 
-    title = clean_text(
-        job_data.get("title")
+            if value is not None:
+                value = str(value).strip()
+
+                if value:
+                    return value
+
+        except Exception:
+            pass
+
+    # Local .env / environment
+    value = os.getenv(name)
+
+    if value is not None:
+        value = str(value).strip()
+
+        if value:
+            return value
+
+    return None
+
+
+ADZUNA_APP_ID = get_config_value("ADZUNA_APP_ID")
+ADZUNA_APP_KEY = get_config_value("ADZUNA_APP_KEY")
+
+
+# ---------------------------------------------------------------------------
+# Helper Functions
+# ---------------------------------------------------------------------------
+
+def _safe_text(value: Any, default: str = "") -> str:
+    """Safely convert a value to a string."""
+
+    if value is None:
+        return default
+
+    try:
+        return str(value).strip()
+    except Exception:
+        return default
+
+
+def _safe_number(value: Any) -> Optional[float]:
+    """Safely convert numeric values."""
+
+    if value is None:
+        return None
+
+    try:
+        return float(value)
+    except (TypeError, ValueError):
+        return None
+
+
+def _get_nested(data: Dict[str, Any], *keys: str, default: Any = "") -> Any:
+    """Safely retrieve nested dictionary values."""
+
+    current = data
+
+    for key in keys:
+
+        if not isinstance(current, dict):
+            return default
+
+        current = current.get(key)
+
+        if current is None:
+            return default
+
+    return current
+
+
+# ---------------------------------------------------------------------------
+# Normalize Adzuna Job
+# ---------------------------------------------------------------------------
+
+def normalize_job(job: Dict[str, Any]) -> Dict[str, Any]:
+    """
+    Convert an Adzuna job object into the format expected by JobSentinel.
+    """
+
+    location = _get_nested(
+        job,
+        "location",
+        "display_name",
+        default="India"
     )
 
-    if title:
-        return title
-
-    function = clean_text(
-        job_data.get("function")
+    company = _get_nested(
+        job,
+        "company",
+        "display_name",
+        default="Unknown Company"
     )
 
-    if function:
-        return function
-
-    department = clean_text(
-        job_data.get("department")
+    category = _get_nested(
+        job,
+        "category",
+        "label",
+        default=""
     )
 
-    if department:
-        return department
+    salary_min = _safe_number(job.get("salary_min"))
+    salary_max = _safe_number(job.get("salary_max"))
 
-    industry = clean_text(
-        job_data.get("industry")
-    )
+    return {
+        "title": _safe_text(
+            job.get("title"),
+            "Unknown Job"
+        ),
 
-    return industry
+        "company": _safe_text(
+            company,
+            "Unknown Company"
+        ),
+
+        "location": _safe_text(
+            location,
+            "India"
+        ),
+
+        "salary_min": salary_min,
+
+        "salary_max": salary_max,
+
+        "salary_is_predicted": _safe_text(
+            job.get("salary_is_predicted")
+        ),
+
+        "contract_type": _safe_text(
+            job.get("contract_type")
+        ),
+
+        "contract_time": _safe_text(
+            job.get("contract_time")
+        ),
+
+        "category": _safe_text(
+            category
+        ),
+
+        "description": _safe_text(
+            job.get("description")
+        ),
+
+        "created": _safe_text(
+            job.get("created")
+        ),
+
+        "redirect_url": _safe_text(
+            job.get("redirect_url")
+        ),
+
+        "id": _safe_text(
+            job.get("id")
+        ),
+
+        "adref": _safe_text(
+            job.get("adref")
+        ),
+    }
 
 
-def extract_location(job_data):
-    if not isinstance(job_data, dict):
-        return ""
-
-    return clean_text(
-        job_data.get("location")
-    )
-
-
-# ============================================================
-# ADZUNA SEARCH
-# ============================================================
+# ---------------------------------------------------------------------------
+# Search Adzuna
+# ---------------------------------------------------------------------------
 
 def search_adzuna(
-    job_data,
-    results_per_page=10
-):
+    job_data: Optional[Dict[str, Any]] = None,
+    results_per_page: int = 5
+) -> Dict[str, Any]:
+    """
+    Search Adzuna India jobs.
 
-    # --------------------------------------------------------
-    # CHECK API CREDENTIALS
-    # --------------------------------------------------------
+    Example:
 
-    if not ADZUNA_APP_ID:
+        search_adzuna(
+            {
+                "title": "Python Developer",
+                "location": "Bangalore"
+            },
+            5
+        )
+    """
+
+    # -----------------------------------------------------------------------
+    # Credentials
+    # -----------------------------------------------------------------------
+
+    app_id = get_config_value("ADZUNA_APP_ID")
+    app_key = get_config_value("ADZUNA_APP_KEY")
+
+    if not app_id:
         return {
             "success": False,
             "jobs": [],
@@ -122,7 +259,7 @@ def search_adzuna(
             "message": "ADZUNA_APP_ID is not configured."
         }
 
-    if not ADZUNA_APP_KEY:
+    if not app_key:
         return {
             "success": False,
             "jobs": [],
@@ -130,123 +267,134 @@ def search_adzuna(
             "message": "ADZUNA_APP_KEY is not configured."
         }
 
+    # -----------------------------------------------------------------------
+    # Input
+    # -----------------------------------------------------------------------
 
-    # --------------------------------------------------------
-    # SEARCH VALUES
-    # --------------------------------------------------------
+    if job_data is None:
+        job_data = {}
 
-    keywords = build_keywords(job_data)
-    location = extract_location(job_data)
+    if not isinstance(job_data, dict):
+        job_data = {}
 
-    if not keywords:
-        return {
-            "success": False,
-            "jobs": [],
-            "total_count": 0,
-            "message": "No job title or search keyword was provided."
-        }
+    title = _safe_text(
+        job_data.get("title")
+        or job_data.get("job_title")
+        or job_data.get("query")
+    )
 
+    location = _safe_text(
+        job_data.get("location")
+    )
 
-    # --------------------------------------------------------
-    # PARAMETERS
-    # --------------------------------------------------------
+    # -----------------------------------------------------------------------
+    # Results limit
+    # -----------------------------------------------------------------------
+
+    try:
+        results_per_page = int(results_per_page)
+    except (TypeError, ValueError):
+        results_per_page = 5
+
+    results_per_page = max(
+        1,
+        min(results_per_page, 50)
+    )
+
+    # -----------------------------------------------------------------------
+    # Adzuna endpoint
+    # -----------------------------------------------------------------------
+
+    url = f"{ADZUNA_BASE_URL}/1"
 
     params = {
-        "app_id": ADZUNA_APP_ID,
-        "app_key": ADZUNA_APP_KEY,
-        "results_per_page": int(results_per_page),
-        "what": keywords,
-        "content-type": "application/json"
+        "app_id": app_id,
+        "app_key": app_key,
+        "results_per_page": results_per_page,
+        "content-type": "application/json",
     }
 
-    # Only send location if user entered one.
+    # Adzuna "what" parameter
+    if title:
+        params["what"] = title
+
+    # Adzuna "where" parameter
     if location:
         params["where"] = location
 
+    # -----------------------------------------------------------------------
+    # Console debugging
+    # -----------------------------------------------------------------------
 
-    # --------------------------------------------------------
-    # DEBUG
-    # --------------------------------------------------------
-
-    print()
-    print("=" * 70)
+    print("\n" + "=" * 70)
     print("JOBSENTINEL - ADZUNA JOB SEARCH")
     print("=" * 70)
 
-    print("URL      :", ADZUNA_SEARCH_URL)
-    print("Keywords :", keywords)
-    print("Location :", location if location else "Any")
-    print("Results  :", results_per_page)
-    print()
+    print(f"URL      : {url}")
+    print(f"Keywords : {title if title else 'Any'}")
+    print(f"Location : {location if location else 'Any'}")
+    print(f"Results  : {results_per_page}")
 
-
-    # --------------------------------------------------------
-    # REQUEST
-    # --------------------------------------------------------
+    # -----------------------------------------------------------------------
+    # API request
+    # -----------------------------------------------------------------------
 
     try:
 
         response = requests.get(
-            ADZUNA_SEARCH_URL,
+            url,
             params=params,
-            timeout=20
+            timeout=ADZUNA_TIMEOUT
         )
-
-        print(
-            "HTTP Status:",
-            response.status_code
-        )
-
-        response.raise_for_status()
 
     except requests.exceptions.Timeout:
 
-        print("ERROR: Request timed out.")
+        print("Adzuna request timed out.")
 
         return {
             "success": False,
             "jobs": [],
             "total_count": 0,
-            "message": "Adzuna request timed out."
+            "message": "Adzuna API request timed out."
         }
 
-    except requests.exceptions.HTTPError as error:
+    except requests.exceptions.RequestException as exc:
 
-        print(
-            "HTTP ERROR:",
-            error
-        )
-
-        print(
-            "Response:",
-            response.text[:1000]
-        )
+        print(f"Adzuna request failed: {exc}")
 
         return {
             "success": False,
             "jobs": [],
             "total_count": 0,
-            "message": f"Adzuna HTTP error: {error}"
+            "message": f"Adzuna API request failed: {exc}"
         }
 
-    except requests.exceptions.RequestException as error:
+    # -----------------------------------------------------------------------
+    # HTTP status
+    # -----------------------------------------------------------------------
 
-        print(
-            "REQUEST ERROR:",
-            error
-        )
+    print(f"HTTP Status: {response.status_code}")
+
+    if response.status_code != 200:
+
+        error_text = response.text[:1000]
+
+        print("Adzuna API error:")
+        print(error_text)
 
         return {
             "success": False,
             "jobs": [],
             "total_count": 0,
-            "message": f"Adzuna request failed: {error}"
+            "message": (
+                f"Adzuna API returned HTTP "
+                f"{response.status_code}."
+            )
         }
 
-
-    # --------------------------------------------------------
-    # JSON
-    # --------------------------------------------------------
+    # -----------------------------------------------------------------------
+    # JSON response
+    # -----------------------------------------------------------------------
 
     try:
 
@@ -254,32 +402,20 @@ def search_adzuna(
 
     except ValueError:
 
-        print("ERROR: Adzuna returned invalid JSON.")
-        print(response.text[:1000])
-
         return {
             "success": False,
             "jobs": [],
             "total_count": 0,
-            "message": "Adzuna returned invalid JSON."
+            "message": "Adzuna returned an invalid JSON response."
         }
 
+    print(f"Response type: {type(data).__name__}")
 
-    # --------------------------------------------------------
-    # RAW RESPONSE CHECK
-    # --------------------------------------------------------
-
-    print(
-        "Response type:",
-        type(data).__name__
-    )
+    # -----------------------------------------------------------------------
+    # Validate response
+    # -----------------------------------------------------------------------
 
     if not isinstance(data, dict):
-
-        print(
-            "Unexpected response:",
-            str(data)[:1000]
-        )
 
         return {
             "success": False,
@@ -288,312 +424,169 @@ def search_adzuna(
             "message": "Unexpected Adzuna response format."
         }
 
+    # -----------------------------------------------------------------------
+    # Extract results
+    # -----------------------------------------------------------------------
 
-    # --------------------------------------------------------
-    # EXTRACT RESULTS
-    # --------------------------------------------------------
+    total_count = data.get("count", 0)
 
-    total_count = data.get(
-        "count",
-        0
-    )
+    try:
+        total_count = int(total_count)
+    except (TypeError, ValueError):
+        total_count = 0
 
-    raw_jobs = data.get(
-        "results",
-        []
-    )
+    raw_jobs = data.get("results", [])
 
+    if not isinstance(raw_jobs, list):
+        raw_jobs = []
 
-    print(
-        "Total jobs found:",
-        total_count
-    )
+    print(f"Total jobs found: {total_count}")
+    print(f"Raw jobs returned: {len(raw_jobs)}")
 
-    print(
-        "Raw jobs returned:",
-        len(raw_jobs)
-    )
+    # -----------------------------------------------------------------------
+    # Normalize
+    # -----------------------------------------------------------------------
 
+    normalized_jobs: List[Dict[str, Any]] = []
 
-    # --------------------------------------------------------
-    # NORMALIZE JOBS
-    # --------------------------------------------------------
+    for raw_job in raw_jobs:
 
-    jobs = []
-
-    for job in raw_jobs:
-
-        if not isinstance(job, dict):
+        if not isinstance(raw_job, dict):
             continue
 
+        try:
 
-        # COMPANY
+            normalized = normalize_job(raw_job)
 
-        company_data = job.get(
-            "company",
-            {}
-        )
+            # Require at least a title
+            if normalized["title"]:
+                normalized_jobs.append(normalized)
 
-        if isinstance(company_data, dict):
+        except Exception as exc:
 
-            company_name = clean_text(
-                company_data.get(
-                    "display_name",
-                    ""
-                )
-            )
-
-        else:
-
-            company_name = clean_text(
-                company_data
-            )
-
-
-        # LOCATION
-
-        location_data = job.get(
-            "location",
-            {}
-        )
-
-        if isinstance(location_data, dict):
-
-            job_location = clean_text(
-                location_data.get(
-                    "display_name",
-                    ""
-                )
-            )
-
-        else:
-
-            job_location = clean_text(
-                location_data
-            )
-
-
-        # CATEGORY
-
-        category_data = job.get(
-            "category",
-            {}
-        )
-
-        if isinstance(category_data, dict):
-
-            category = clean_text(
-                category_data.get(
-                    "label",
-                    ""
-                )
-            )
-
-        else:
-
-            category = ""
-
-
-        # ADD JOB
-
-        normalized_job = {
-
-            "title": clean_text(
-                job.get(
-                    "title",
-                    "Job Opportunity"
-                )
-            ),
-
-            "company": (
-                company_name
-                if company_name
-                else "Company not specified"
-            ),
-
-            "location": (
-                job_location
-                if job_location
-                else "Location not specified"
-            ),
-
-            "salary_min": job.get(
-                "salary_min"
-            ),
-
-            "salary_max": job.get(
-                "salary_max"
-            ),
-
-            "salary_is_predicted": job.get(
-                "salary_is_predicted",
-                False
-            ),
-
-            "contract_type": clean_text(
-                job.get(
-                    "contract_type",
-                    ""
-                )
-            ),
-
-            "contract_time": clean_text(
-                job.get(
-                    "contract_time",
-                    ""
-                )
-            ),
-
-            "category": category,
-
-            "description": clean_text(
-                job.get(
-                    "description",
-                    ""
-                )
-            ),
-
-            "created": clean_text(
-                job.get(
-                    "created",
-                    ""
-                )
-            ),
-
-            "redirect_url": clean_text(
-                job.get(
-                    "redirect_url",
-                    ""
-                )
-            ),
-
-            # Keep these because similarity ranking
-            # can use them if available.
-            "id": clean_text(
-                job.get(
-                    "id",
-                    ""
-                )
-            ),
-
-            "adref": clean_text(
-                job.get(
-                    "adref",
-                    ""
-                )
-            )
-        }
-
-        jobs.append(
-            normalized_job
-        )
-
-
-    # --------------------------------------------------------
-    # FINAL RESULT
-    # --------------------------------------------------------
+            print(f"Could not normalize job: {exc}")
 
     print(
-        "Normalized jobs:",
-        len(jobs)
+        f"Normalized jobs: {len(normalized_jobs)}"
     )
 
-    if jobs:
+    # -----------------------------------------------------------------------
+    # No results
+    # -----------------------------------------------------------------------
 
-        print()
+    if not normalized_jobs:
+
         print(
-            "Successfully retrieved",
-            len(jobs),
-            "jobs."
+            "Adzuna responded successfully, "
+            "but no matching jobs were found."
         )
-
-        for index, job in enumerate(
-            jobs[:3],
-            start=1
-        ):
-
-            print(
-                f"{index}. "
-                f"{job['title']} | "
-                f"{job['company']} | "
-                f"{job['location']}"
-            )
-
-        print("=" * 70)
 
         return {
             "success": True,
-            "jobs": jobs,
+            "jobs": [],
             "total_count": total_count,
             "message": (
-                f"Found {len(jobs)} job opportunities."
+                "Adzuna responded successfully, "
+                "but no matching jobs were found."
             )
         }
 
+    # -----------------------------------------------------------------------
+    # Print jobs
+    # -----------------------------------------------------------------------
 
-    print()
     print(
-        "Adzuna returned no usable jobs."
+        f"\nSuccessfully retrieved "
+        f"{len(normalized_jobs)} jobs."
     )
+
+    for index, job in enumerate(
+        normalized_jobs[:5],
+        start=1
+    ):
+
+        print(
+            f"{index}. "
+            f"{job['title']} | "
+            f"{job['company']} | "
+            f"{job['location']}"
+        )
 
     print("=" * 70)
 
+    # -----------------------------------------------------------------------
+    # Return
+    # -----------------------------------------------------------------------
+
     return {
         "success": True,
-        "jobs": [],
+        "jobs": normalized_jobs,
         "total_count": total_count,
         "message": (
-            "Adzuna responded successfully, "
-            "but no usable jobs were returned."
+            f"Found {len(normalized_jobs)} "
+            f"job opportunities."
         )
     }
 
 
-# ============================================================
-# PUBLIC FUNCTION USED BY APP
-# ============================================================
+# ---------------------------------------------------------------------------
+# Compatibility Function
+# ---------------------------------------------------------------------------
 
 def find_similar_jobs(
-    job_data,
-    results_per_page=10
-):
+    job_data: Optional[Dict[str, Any]] = None,
+    results_per_page: int = 5
+) -> Dict[str, Any]:
+    """
+    Compatibility wrapper used by the existing JobSentinel app.
+
+    This allows existing app.py code that calls find_similar_jobs()
+    to continue working.
+    """
 
     return search_adzuna(
-        job_data,
-        results_per_page
+        job_data=job_data,
+        results_per_page=results_per_page
     )
 
 
-# ============================================================
-# DIRECT TEST
-# ============================================================
+# ---------------------------------------------------------------------------
+# Simple Direct Test
+# ---------------------------------------------------------------------------
 
 if __name__ == "__main__":
 
-    print()
-    print("=" * 70)
+    print("\n" + "=" * 70)
     print("JobSentinel - Adzuna API Test")
     print("=" * 70)
 
-
-    test_job = {
-        "title": "developer",
-        "location": ""
-    }
-
-
     result = search_adzuna(
-        test_job,
+        {
+            "title": "developer",
+            "location": ""
+        },
         5
     )
 
-
-    print()
-    print("Success:", result["success"])
-    print("Total:", result["total_count"])
-    print("Jobs:", len(result["jobs"]))
-    print("Message:", result["message"])
-
-
-    print()
+    print("\n" + "=" * 70)
+    print("TEST RESULT")
     print("=" * 70)
+
+    print(
+        f"Success: {result.get('success')}"
+    )
+
+    print(
+        f"Total: {result.get('total_count')}"
+    )
+
+    print(
+        f"Jobs: {len(result.get('jobs', []))}"
+    )
+
+    print(
+        f"Message: {result.get('message')}"
+    )
+
+    print("=" * 70)
+```
