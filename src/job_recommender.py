@@ -1,4 +1,4 @@
-```python
+
 """
 JobSentinel - Adzuna Job Recommendation Module
 
@@ -589,4 +589,4 @@ if __name__ == "__main__":
     )
 
     print("=" * 70)
-```
+
